@@ -106,12 +106,18 @@ jobs:
         id: get_tag_for_build
         run: |
           if [ "${{ github.event_name }}" == "repository_dispatch" ]; then
-            echo "TAG_NAME=${{ github.event.client_payload.tag }}" >> $GITHUB_OUTPUT
+            TAG_NAME="${{ github.event.client_payload.tag }}"
           elif [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
-            echo "TAG_NAME=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
+            TAG_NAME="${{ github.event.inputs.tag }}"
           else
-            echo "TAG_NAME=HEAD" >> $GITHUB_OUTPUT
+            TAG_NAME="HEAD"
           fi
+          # Ensure tag has 'v' prefix if it's not HEAD and doesn't start with 'v'
+          if [ "$TAG_NAME" != "HEAD" ] && [[ ! "$TAG_NAME" =~ ^v ]]; then
+            TAG_NAME="v$TAG_NAME"
+          fi
+          echo "TAG_NAME=$TAG_NAME" >> $GITHUB_OUTPUT
+          echo "Using tag for checkout: $TAG_NAME"
 
       - name: Checkout private source repo
         uses: actions/checkout@v3
@@ -191,12 +197,18 @@ jobs:
         id: get_tag_for_build
         run: |
           if [ "${{ github.event_name }}" == "repository_dispatch" ]; then
-            echo "TAG_NAME=${{ github.event.client_payload.tag }}" >> $GITHUB_OUTPUT
+            TAG_NAME="${{ github.event.client_payload.tag }}"
           elif [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
-            echo "TAG_NAME=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
+            TAG_NAME="${{ github.event.inputs.tag }}"
           else
-            echo "TAG_NAME=HEAD" >> $GITHUB_OUTPUT
+            TAG_NAME="HEAD"
           fi
+          # Ensure tag has 'v' prefix if it's not HEAD and doesn't start with 'v'
+          if [ "$TAG_NAME" != "HEAD" ] && [[ ! "$TAG_NAME" =~ ^v ]]; then
+            TAG_NAME="v$TAG_NAME"
+          fi
+          echo "TAG_NAME=$TAG_NAME" >> $GITHUB_OUTPUT
+          echo "Using tag for checkout: $TAG_NAME"
 
       - name: Checkout private source repo
         uses: actions/checkout@v3
@@ -276,12 +288,18 @@ jobs:
         id: get_tag_for_build
         run: |
           if [ "${{ github.event_name }}" == "repository_dispatch" ]; then
-            echo "TAG_NAME=${{ github.event.client_payload.tag }}" >> $GITHUB_OUTPUT
+            TAG_NAME="${{ github.event.client_payload.tag }}"
           elif [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
-            echo "TAG_NAME=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
+            TAG_NAME="${{ github.event.inputs.tag }}"
           else
-            echo "TAG_NAME=HEAD" >> $GITHUB_OUTPUT
+            TAG_NAME="HEAD"
           fi
+          # Ensure tag has 'v' prefix if it's not HEAD and doesn't start with 'v'
+          if [ "$TAG_NAME" != "HEAD" ] && [[ ! "$TAG_NAME" =~ ^v ]]; then
+            TAG_NAME="v$TAG_NAME"
+          fi
+          echo "TAG_NAME=$TAG_NAME" >> $GITHUB_OUTPUT
+          echo "Using tag for checkout: $TAG_NAME"
 
       - name: Checkout private source repo
         uses: actions/checkout@v3
