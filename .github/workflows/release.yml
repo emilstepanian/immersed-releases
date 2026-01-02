@@ -367,7 +367,7 @@ jobs:
         run: |
           mkdir -p release
           # Copy all artifacts to release directory
-          find release-artifacts -type f \( -name "*.dmg" -o -name "*.exe" -o -name "*.yml" -o -name "*.blockmap" \) -exec cp {} release/ \;
+          find release-artifacts -type f \( -name "*.dmg" -o -name "*.zip" -o -name "*.exe" -o -name "*.yml" -o -name "*.blockmap" \) -exec cp {} release/ \;
 
       - name: Get tag name and release notes
         id: get_tag
