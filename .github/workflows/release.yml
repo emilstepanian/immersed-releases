@@ -1,3 +1,15 @@
+# =============================================================================
+# IMMERSED RELEASE WORKFLOW
+# =============================================================================
+# NOTE: This is a COPY of the workflow that runs in the immersed-releases repo.
+# The ACTUAL workflow that builds and releases the app is located at:
+#   https://github.com/emilstepanian/immersed-releases/.github/workflows/release.yml
+#
+# This file is kept here for reference only. If you need to make changes to the
+# release process, update the workflow in the immersed-releases repo, then copy
+# it here for documentation purposes.
+# =============================================================================
+
 name: Build and Release
 
 on:
@@ -366,8 +378,39 @@ jobs:
       - name: Prepare release files
         run: |
           mkdir -p release
-          # Copy all artifacts to release directory
-          find release-artifacts -type f \( -name "*.dmg" -o -name "*.zip" -o -name "*.exe" -o -name "*.yml" -o -name "*.blockmap" \) -exec cp {} release/ \;
+
+          # Copy non-yml files first (these don't conflict)
+          find release-artifacts -type f \( -name "*.dmg" -o -name "*.zip" -o -name "*.exe" -o -name "*.blockmap" \) -exec cp {} release/ \;
+
+          # Handle yml files - need to rename arm64 version to prevent overwrite
+          # Intel build creates: latest-mac.yml
+          # ARM build also creates: latest-mac.yml (would overwrite)
+          # We need: latest-mac.yml (Intel) and latest-mac-arm64.yml (ARM)
+
+          # Copy Intel yml files
+          if [ -f "release-artifacts/release-mac-intel/latest-mac.yml" ]; then
+            cp release-artifacts/release-mac-intel/latest-mac.yml release/latest-mac.yml
+            echo "✓ Copied Intel latest-mac.yml"
+          fi
+
+          # Copy and rename ARM yml files for electron-updater to detect ARM architecture
+          if [ -f "release-artifacts/release-mac-arm/latest-mac.yml" ]; then
+            cp release-artifacts/release-mac-arm/latest-mac.yml release/latest-mac-arm64.yml
+            echo "✓ Copied ARM latest-mac.yml as latest-mac-arm64.yml"
+          fi
+
+          # Copy Windows yml
+          if [ -f "release-artifacts/release-windows/latest.yml" ]; then
+            cp release-artifacts/release-windows/latest.yml release/latest.yml
+            echo "✓ Copied Windows latest.yml"
+          fi
+
+          # Copy any other yml files that might exist (app-update.yml, builder-debug.yml, etc.)
+          find release-artifacts -name "*.yml" ! -name "latest-mac.yml" ! -name "latest.yml" -exec cp {} release/ \; 2>/dev/null || true
+
+          echo ""
+          echo "Release files prepared:"
+          ls -la release/
 
       - name: Get tag name and release notes
         id: get_tag
