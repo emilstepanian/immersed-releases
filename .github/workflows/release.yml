@@ -1,0 +1,460 @@
+name: Build and Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Version tag (e.g., v1.4.1)'
+        required: true
+  repository_dispatch:
+    types: [create-release]
+
+jobs:
+  cleanup-old-artifacts:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Checkout public releases repo
+        uses: actions/checkout@v3
+
+      - name: Cleanup old artifacts
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+          script: |
+            // Get all tags to map commits to version tags
+            const { data: tags } = await github.rest.repos.listTags({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              per_page: 100
+            });
+
+            const tagMap = new Map();
+            for (const tag of tags) {
+              if (tag.name.startsWith('v')) {
+                tagMap.set(tag.commit.sha, tag.name);
+              }
+            }
+
+            // Get all workflow runs
+            const { data: workflows } = await github.rest.actions.listWorkflowRunsForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'release-public-repo.yml',
+              per_page: 100
+            });
+
+            // Filter runs that were triggered and map them to their tags
+            const versionRuns = [];
+            for (const run of workflows.workflow_runs) {
+              // Try to extract tag from run name or use head_sha
+              const tag = tagMap.get(run.head_sha);
+              if (tag && tag.startsWith('v')) {
+                versionRuns.push({ ...run, versionTag: tag });
+              }
+            }
+
+            // Group by version tag and get the latest run for each version
+            const versionMap = new Map();
+            for (const run of versionRuns) {
+              const tag = run.versionTag;
+              if (!versionMap.has(tag) || new Date(run.created_at) > new Date(versionMap.get(tag).created_at)) {
+                versionMap.set(tag, run);
+              }
+            }
+
+            // Sort by creation date (newest first)
+            const sortedVersions = Array.from(versionMap.values())
+              .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+
+            // Keep only the 3 latest versions
+            const versionsToKeep = sortedVersions.slice(0, 3);
+            const versionsToDelete = sortedVersions.slice(3);
+
+            console.log(`Keeping artifacts from ${versionsToKeep.length} latest versions: ${versionsToKeep.map(v => v.versionTag).join(', ')}`);
+            console.log(`Deleting artifacts from ${versionsToDelete.length} older versions: ${versionsToDelete.map(v => v.versionTag).join(', ')}`);
+
+            // Get all artifacts and delete those from old versions
+            for (const runToDelete of versionsToDelete) {
+              try {
+                const { data: artifacts } = await github.rest.actions.listWorkflowRunArtifacts({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  run_id: runToDelete.id
+                });
+
+                for (const artifact of artifacts.artifacts) {
+                  await github.rest.actions.deleteArtifact({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    artifact_id: artifact.id
+                  });
+                  console.log(`Deleted artifact: ${artifact.name} from run ${runToDelete.id} (${runToDelete.versionTag})`);
+                }
+              } catch (error) {
+                console.log(`Error cleaning up artifacts for run ${runToDelete.id}: ${error.message}`);
+              }
+            }
+
+  build-mac-intel:
+    needs: cleanup-old-artifacts
+    runs-on: macos-latest
+    steps:
+      - name: Checkout private source repo
+        uses: actions/checkout@v3
+        with:
+          repository: emilstepanian/immersed
+          token: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Import Apple Certificate
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          # Create variables
+          CERTIFICATE_PATH=$RUNNER_TEMP/build_certificate.p12
+          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+
+          # Decode certificate
+          echo -n "$APPLE_CERTIFICATE" | base64 --decode --output $CERTIFICATE_PATH
+
+          # Create temporary keychain
+          security create-keychain -p "" $KEYCHAIN_PATH
+          security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
+          security unlock-keychain -p "" $KEYCHAIN_PATH
+
+          # Import certificate to keychain
+          security import $CERTIFICATE_PATH -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
+          security list-keychain -d user -s $KEYCHAIN_PATH
+
+          # Set keychain to not timeout during build
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "" $KEYCHAIN_PATH
+
+          # Verify certificate is imported correctly
+          security find-identity -v -p codesigning $KEYCHAIN_PATH
+
+      - name: Build for macOS Intel
+        env:
+          GH_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          VITE_FIREBASE_API_KEY: ${{ secrets.VITE_FIREBASE_API_KEY }}
+          VITE_FIREBASE_AUTH_DOMAIN: ${{ secrets.VITE_FIREBASE_AUTH_DOMAIN }}
+          VITE_FIREBASE_PROJECT_ID: ${{ secrets.VITE_FIREBASE_PROJECT_ID }}
+          VITE_FIREBASE_STORAGE_BUCKET: ${{ secrets.VITE_FIREBASE_STORAGE_BUCKET }}
+          VITE_FIREBASE_MESSAGING_SENDER_ID: ${{ secrets.VITE_FIREBASE_MESSAGING_SENDER_ID }}
+          VITE_FIREBASE_APP_ID: ${{ secrets.VITE_FIREBASE_APP_ID }}
+          VITE_FIREBASE_MEASUREMENT_ID: ${{ secrets.VITE_FIREBASE_MEASUREMENT_ID }}
+          VITE_STRIPE_PUBLISHABLE_KEY: ${{ secrets.VITE_STRIPE_PUBLISHABLE_KEY }}
+          VITE_STRIPE_PRICE_PRO_MONTHLY: ${{ secrets.VITE_STRIPE_PRICE_PRO_MONTHLY }}
+          VITE_STRIPE_PRICE_PRO_ANNUAL: ${{ secrets.VITE_STRIPE_PRICE_PRO_ANNUAL }}
+          VITE_STRIPE_PRICE_LIFETIME: ${{ secrets.VITE_STRIPE_PRICE_LIFETIME }}
+          VITE_WEB_URL: ${{ secrets.VITE_WEB_URL }}
+          VITE_SENTRY_DSN: ${{ secrets.VITE_SENTRY_DSN }}
+        run: npm run build:mac:x64
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-mac-intel
+          path: release/*
+
+  build-mac-arm:
+    needs: cleanup-old-artifacts
+    runs-on: macos-latest
+    steps:
+      - name: Checkout private source repo
+        uses: actions/checkout@v3
+        with:
+          repository: emilstepanian/immersed
+          token: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Import Apple Certificate
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          # Create variables
+          CERTIFICATE_PATH=$RUNNER_TEMP/build_certificate.p12
+          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+
+          # Decode certificate
+          echo -n "$APPLE_CERTIFICATE" | base64 --decode --output $CERTIFICATE_PATH
+
+          # Create temporary keychain
+          security create-keychain -p "" $KEYCHAIN_PATH
+          security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
+          security unlock-keychain -p "" $KEYCHAIN_PATH
+
+          # Import certificate to keychain
+          security import $CERTIFICATE_PATH -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
+          security list-keychain -d user -s $KEYCHAIN_PATH
+
+          # Set keychain to not timeout during build
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "" $KEYCHAIN_PATH
+
+          # Verify certificate is imported correctly
+          security find-identity -v -p codesigning $KEYCHAIN_PATH
+
+      - name: Build for macOS Apple Silicon
+        env:
+          GH_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          VITE_FIREBASE_API_KEY: ${{ secrets.VITE_FIREBASE_API_KEY }}
+          VITE_FIREBASE_AUTH_DOMAIN: ${{ secrets.VITE_FIREBASE_AUTH_DOMAIN }}
+          VITE_FIREBASE_PROJECT_ID: ${{ secrets.VITE_FIREBASE_PROJECT_ID }}
+          VITE_FIREBASE_STORAGE_BUCKET: ${{ secrets.VITE_FIREBASE_STORAGE_BUCKET }}
+          VITE_FIREBASE_MESSAGING_SENDER_ID: ${{ secrets.VITE_FIREBASE_MESSAGING_SENDER_ID }}
+          VITE_FIREBASE_APP_ID: ${{ secrets.VITE_FIREBASE_APP_ID }}
+          VITE_FIREBASE_MEASUREMENT_ID: ${{ secrets.VITE_FIREBASE_MEASUREMENT_ID }}
+          VITE_STRIPE_PUBLISHABLE_KEY: ${{ secrets.VITE_STRIPE_PUBLISHABLE_KEY }}
+          VITE_STRIPE_PRICE_PRO_MONTHLY: ${{ secrets.VITE_STRIPE_PRICE_PRO_MONTHLY }}
+          VITE_STRIPE_PRICE_PRO_ANNUAL: ${{ secrets.VITE_STRIPE_PRICE_PRO_ANNUAL }}
+          VITE_STRIPE_PRICE_LIFETIME: ${{ secrets.VITE_STRIPE_PRICE_LIFETIME }}
+          VITE_WEB_URL: ${{ secrets.VITE_WEB_URL }}
+          VITE_SENTRY_DSN: ${{ secrets.VITE_SENTRY_DSN }}
+        run: npm run build:mac:arm64
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-mac-arm
+          path: release/*
+
+  build-windows:
+    needs: cleanup-old-artifacts
+    runs-on: windows-latest
+    steps:
+      - name: Checkout private source repo
+        uses: actions/checkout@v3
+        with:
+          repository: emilstepanian/immersed
+          token: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build for Windows
+        env:
+          GH_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+          VITE_FIREBASE_API_KEY: ${{ secrets.VITE_FIREBASE_API_KEY }}
+          VITE_FIREBASE_AUTH_DOMAIN: ${{ secrets.VITE_FIREBASE_AUTH_DOMAIN }}
+          VITE_FIREBASE_PROJECT_ID: ${{ secrets.VITE_FIREBASE_PROJECT_ID }}
+          VITE_FIREBASE_STORAGE_BUCKET: ${{ secrets.VITE_FIREBASE_STORAGE_BUCKET }}
+          VITE_FIREBASE_MESSAGING_SENDER_ID: ${{ secrets.VITE_FIREBASE_MESSAGING_SENDER_ID }}
+          VITE_FIREBASE_APP_ID: ${{ secrets.VITE_FIREBASE_APP_ID }}
+          VITE_FIREBASE_MEASUREMENT_ID: ${{ secrets.VITE_FIREBASE_MEASUREMENT_ID }}
+          VITE_STRIPE_PUBLISHABLE_KEY: ${{ secrets.VITE_STRIPE_PUBLISHABLE_KEY }}
+          VITE_STRIPE_PRICE_PRO_MONTHLY: ${{ secrets.VITE_STRIPE_PRICE_PRO_MONTHLY }}
+          VITE_STRIPE_PRICE_PRO_ANNUAL: ${{ secrets.VITE_STRIPE_PRICE_PRO_ANNUAL }}
+          VITE_STRIPE_PRICE_LIFETIME: ${{ secrets.VITE_STRIPE_PRICE_LIFETIME }}
+          VITE_WEB_URL: ${{ secrets.VITE_WEB_URL }}
+          VITE_SENTRY_DSN: ${{ secrets.VITE_SENTRY_DSN }}
+        run: npm run build:win:x64
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-windows
+          path: release/*
+
+  release:
+    needs: [build-mac-intel, build-mac-arm, build-windows]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout public releases repo
+        uses: actions/checkout@v3
+
+      - name: Checkout private source repo (for tag info)
+        uses: actions/checkout@v3
+        with:
+          repository: emilstepanian/immersed
+          token: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+          fetch-depth: 0
+          path: source-repo
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+
+      - name: Prepare release files
+        run: |
+          mkdir -p release
+          # Copy all artifacts to release directory
+          find release-artifacts -type f \( -name "*.dmg" -o -name "*.exe" -o -name "*.yml" -o -name "*.blockmap" \) -exec cp {} release/ \;
+
+      - name: Get tag name
+        id: get_tag
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            TAG_NAME="${{ github.event.inputs.tag }}"
+          elif [ "${{ github.event_name }}" == "repository_dispatch" ]; then
+            TAG_NAME="${{ github.event.client_payload.tag }}"
+          else
+            # Get the latest tag from the private repo
+            cd source-repo
+            TAG_NAME=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+            if [ -z "$TAG_NAME" ]; then
+              echo "ERROR: Could not determine tag name"
+              exit 1
+            fi
+          fi
+          echo "TAG_NAME=$TAG_NAME" >> $GITHUB_OUTPUT
+          echo "Using tag: $TAG_NAME"
+
+      - name: Create Release in public releases repo
+        env:
+          GITHUB_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+          RELEASE_REPO: emilstepanian/immersed-releases
+          TAG_NAME: ${{ steps.get_tag.outputs.TAG_NAME }}
+        run: |
+          # Get release notes from tag message or use default
+          cd source-repo
+          RELEASE_NOTES=$(git tag -l --format='%(contents)' "$TAG_NAME" 2>/dev/null || echo "Release $TAG_NAME")
+          cd ..
+          
+          # Escape the release notes for JSON
+          RELEASE_NOTES_JSON=$(echo "$RELEASE_NOTES" | jq -Rs .)
+          
+          # Create release using GitHub API
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+            -H "Authorization: token $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/$RELEASE_REPO/releases" \
+            -d "{
+              \"tag_name\": \"$TAG_NAME\",
+              \"name\": \"$TAG_NAME\",
+              \"body\": $RELEASE_NOTES_JSON,
+              \"draft\": false,
+              \"prerelease\": false
+            }")
+          
+          HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+          RELEASE_JSON=$(echo "$RESPONSE" | sed '$d')
+          
+          if [ "$HTTP_CODE" -ne 201 ]; then
+            echo "Failed to create release. HTTP $HTTP_CODE"
+            echo "$RELEASE_JSON"
+            # Check if release already exists or repository is empty
+            if [ "$HTTP_CODE" -eq 422 ]; then
+              ERROR_MESSAGE=$(echo "$RELEASE_JSON" | jq -r '.message // ""')
+              # Check if it's because release already exists
+              EXISTING_RESPONSE=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
+                -H "Accept: application/vnd.github.v3+json" \
+                "https://api.github.com/repos/$RELEASE_REPO/releases/tags/$TAG_NAME")
+              UPLOAD_URL=$(echo "$EXISTING_RESPONSE" | jq -r '.upload_url // empty' | sed 's/{.*}//')
+              if [ -n "$UPLOAD_URL" ] && [ "$UPLOAD_URL" != "null" ]; then
+                echo "Found existing release, will upload to it"
+                echo "UPLOAD_URL=$UPLOAD_URL" >> $GITHUB_ENV
+                exit 0
+              fi
+              # Check if repository is empty
+              if echo "$ERROR_MESSAGE" | grep -q "Repository is empty"; then
+                echo "ERROR: The releases repository is empty. Please add at least one commit (e.g., a README) to the repository before creating releases."
+                exit 1
+              fi
+            fi
+            exit 1
+          fi
+          
+          UPLOAD_URL=$(echo "$RELEASE_JSON" | jq -r '.upload_url' | sed 's/{.*}//')
+          echo "UPLOAD_URL=$UPLOAD_URL" >> $GITHUB_ENV
+          echo "Release created successfully"
+
+      - name: Upload release assets
+        env:
+          GITHUB_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+          RELEASE_REPO: emilstepanian/immersed-releases
+        run: |
+          # Check if UPLOAD_URL is set
+          if [ -z "$UPLOAD_URL" ]; then
+            echo "ERROR: UPLOAD_URL environment variable is not set"
+            exit 1
+          fi
+          
+          echo "Upload URL: $UPLOAD_URL"
+          
+          # List files to upload
+          echo "Files in release directory:"
+          ls -la release/ || echo "Release directory not found or empty"
+          
+          # Check if release directory exists and has files
+          if [ ! -d "release" ]; then
+            echo "ERROR: Release directory does not exist"
+            exit 1
+          fi
+          
+          FILE_COUNT=$(find release -type f | wc -l)
+          if [ "$FILE_COUNT" -eq 0 ]; then
+            echo "ERROR: No files found in release directory"
+            exit 1
+          fi
+          
+          echo "Found $FILE_COUNT file(s) to upload"
+          
+          # Upload each file
+          UPLOAD_FAILED=0
+          for file in release/*; do
+            if [ -f "$file" ]; then
+              FILENAME=$(basename "$file")
+              FILE_SIZE=$(stat -f%z "$file" 2>/dev/null || stat -c%s "$file" 2>/dev/null || echo "unknown")
+              echo "Uploading $FILENAME (size: $FILE_SIZE bytes)..."
+              
+              UPLOAD_RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+                -H "Authorization: token $GITHUB_TOKEN" \
+                -H "Accept: application/vnd.github.v3+json" \
+                -H "Content-Type: application/octet-stream" \
+                --data-binary "@$file" \
+                "$UPLOAD_URL?name=$FILENAME")
+              
+              UPLOAD_HTTP_CODE=$(echo "$UPLOAD_RESPONSE" | tail -n1)
+              UPLOAD_BODY=$(echo "$UPLOAD_RESPONSE" | sed '$d')
+              
+              if [ "$UPLOAD_HTTP_CODE" -ne 201 ]; then
+                echo "ERROR: Failed to upload $FILENAME (HTTP $UPLOAD_HTTP_CODE)"
+                echo "Response: $UPLOAD_BODY"
+                UPLOAD_FAILED=1
+              else
+                echo "✓ Successfully uploaded $FILENAME"
+              fi
+            fi
+          done
+          
+          if [ "$UPLOAD_FAILED" -eq 1 ]; then
+            echo "One or more uploads failed"
+            exit 1
+          fi
+          
+          echo "All files uploaded successfully"
+
