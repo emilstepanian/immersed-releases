@@ -382,21 +382,42 @@ jobs:
           # Copy non-yml files first (these don't conflict)
           find release-artifacts -type f \( -name "*.dmg" -o -name "*.zip" -o -name "*.exe" -o -name "*.blockmap" \) -exec cp {} release/ \;
 
-          # Handle yml files - need to rename arm64 version to prevent overwrite
-          # Intel build creates: latest-mac.yml
-          # ARM build also creates: latest-mac.yml (would overwrite)
-          # We need: latest-mac.yml (Intel) and latest-mac-arm64.yml (ARM)
+          # Merge Intel and ARM latest-mac.yml files into one
+          # electron-updater expects a single latest-mac.yml with all architectures listed
+          INTEL_YML="release-artifacts/release-mac-intel/latest-mac.yml"
+          ARM_YML="release-artifacts/release-mac-arm/latest-mac.yml"
 
-          # Copy Intel yml files
-          if [ -f "release-artifacts/release-mac-intel/latest-mac.yml" ]; then
-            cp release-artifacts/release-mac-intel/latest-mac.yml release/latest-mac.yml
-            echo "✓ Copied Intel latest-mac.yml"
-          fi
-
-          # Copy and rename ARM yml files for electron-updater to detect ARM architecture
-          if [ -f "release-artifacts/release-mac-arm/latest-mac.yml" ]; then
-            cp release-artifacts/release-mac-arm/latest-mac.yml release/latest-mac-arm64.yml
-            echo "✓ Copied ARM latest-mac.yml as latest-mac-arm64.yml"
+          if [ -f "$INTEL_YML" ] && [ -f "$ARM_YML" ]; then
+            echo "Merging Intel and ARM latest-mac.yml files..."
+            
+            # Extract version from Intel yml (both should have same version)
+            VERSION=$(grep "^version:" "$INTEL_YML" | head -1)
+            RELEASE_DATE=$(grep "^releaseDate:" "$INTEL_YML" | head -1)
+            
+            # Start building merged yml
+            echo "$VERSION" > release/latest-mac.yml
+            echo "files:" >> release/latest-mac.yml
+            
+            # Add Intel files
+            sed -n '/^files:/,/^path:/{ /^files:/d; /^path:/d; p }' "$INTEL_YML" >> release/latest-mac.yml
+            
+            # Add ARM files
+            sed -n '/^files:/,/^path:/{ /^files:/d; /^path:/d; p }' "$ARM_YML" >> release/latest-mac.yml
+            
+            # Add path, sha512, releaseDate from Intel (used as default for x64)
+            grep "^path:" "$INTEL_YML" >> release/latest-mac.yml
+            grep "^sha512:" "$INTEL_YML" | head -1 >> release/latest-mac.yml
+            echo "$RELEASE_DATE" >> release/latest-mac.yml
+            
+            echo "✓ Created merged latest-mac.yml with both architectures"
+            echo "Contents:"
+            cat release/latest-mac.yml
+          elif [ -f "$INTEL_YML" ]; then
+            cp "$INTEL_YML" release/latest-mac.yml
+            echo "✓ Copied Intel latest-mac.yml (ARM not found)"
+          elif [ -f "$ARM_YML" ]; then
+            cp "$ARM_YML" release/latest-mac.yml
+            echo "✓ Copied ARM latest-mac.yml (Intel not found)"
           fi
 
           # Copy Windows yml
